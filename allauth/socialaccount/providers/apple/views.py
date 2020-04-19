@@ -2,7 +2,8 @@ import json
 import requests
 from datetime import timedelta
 
-from django.http import HttpResponseRedirect
+from django.conf import settings
+from django.http import HttpResponseRedirect, HttpResponseBadRequest
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import urlencode
@@ -11,6 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 import jwt
 from requests import HTTPError
 
+from allauth.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.models import SocialApp, SocialToken
 from allauth.socialaccount.providers.oauth2.client import OAuth2Error
 from allauth.socialaccount.providers.oauth2.views import (
@@ -43,6 +45,12 @@ class AppleOAuth2Adapter(OAuth2Adapter):
             if d["kid"] == kid:
                 return d
 
+    def authentication_error(request, adapter, error):
+        if settings.DEBUG:
+            raise ImmediateHttpResponse(HttpResponseBadRequest(
+                "Error: {}".format(error)))
+        return super().authentication_error(request, adapter, error=error)
+
     def get_public_key(self, id_token):
         """
         Get the public key which matches the `kid` in the id_token header.
@@ -74,7 +82,7 @@ class AppleOAuth2Adapter(OAuth2Adapter):
             return identity_data
 
         except jwt.PyJWTError as e:
-            raise OAuth2Error("Invalid id_token") from e
+            raise OAuth2Error("Invalid id_token ({})".format(id_token)) from e
 
     def parse_token(self, data):
         token = SocialToken(
@@ -113,20 +121,31 @@ class AppleOAuth2Adapter(OAuth2Adapter):
 
     def get_user_scope_data(self, request):
         user_scope_data = request.apple_login_session.get("user", "")
+        print("Request method 2: {}".format(request.method))
+        print("USER SCOPE DATA: {}".format(user_scope_data))
         try:
             return json.loads(user_scope_data)
         except json.JSONDecodeError:
             # We do not care much about user scope data as it maybe blank
             # so return blank dictionary instead
+            print("RETURNING BLANK FOR USER SCOPE DATA")
             return {}
 
     def get_access_token_data(self, request, app, client):
         """ We need to gather the info from the apple specific login """
         add_apple_session(request)
+        print(request.apple_login_session.keys())
 
         # Exchange `code`
         code = get_request_param(request, "code")
         access_token_data = client.get_access_token(code)
+
+        id_token = request.apple_login_session.get("id_token")
+        print("Request method 1: {}".format(request.method))
+        print("Request path 1: {}".format(request.path))
+        print("ID TOKEN DATA: {}".format(id_token))
+        print("Request session key 1: {}".format(request.session.session_key))
+        print("Apple session key 1: {}".format(request.apple_login_session.session_key))
 
         return {
             **access_token_data,
@@ -153,6 +172,13 @@ def apple_post_callback(request, finish_endpoint_name="apple_finish_callback"):
     """
 
     add_apple_session(request)
+    print(request.apple_login_session.keys())
+    print("Request method 0: {}".format(request.method))
+    print("Request path 0: {}".format(request.path))
+    print("POST:")
+    print(request.POST)
+    print("GET:")
+    print(request.GET)
 
     # Add regular OAuth2 params to the URL - reduces the overrides required
     keys_to_put_in_url = ["code", "state", "error"]
@@ -165,6 +191,7 @@ def apple_post_callback(request, finish_endpoint_name="apple_finish_callback"):
     # Add other params to the apple_login_session
     keys_to_save_to_session = ["user", "id_token"]
     for key in keys_to_save_to_session:
+        print("SESSION: Saving {} as {}".format(key, get_request_param(request, key, "")))
         request.apple_login_session[key] = get_request_param(request, key, "")
 
     url = request.build_absolute_uri(reverse(finish_endpoint_name))
@@ -172,6 +199,11 @@ def apple_post_callback(request, finish_endpoint_name="apple_finish_callback"):
         url=url, query=urlencode(url_params)
     ))
     persist_apple_session(request, response)
+
+    print("Request session key 0: {}".format(request.session.session_key))
+    print("Apple session key 0: {}".format(request.apple_login_session.session_key))
+    print(request.apple_login_session.keys())
+
     return response
 
 
